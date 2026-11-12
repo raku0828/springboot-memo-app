@@ -1,10 +1,5 @@
 services:
   - type: web
     name: springboot-memo-app
-    env: java
+    runtime: docker
     plan: free
-    buildCommand: ./mvnw package -DskipTests
-    startCommand: java -jar target/memoapp-0.0.1-SNAPSHOT.jar
-    envVars:
-      - key: JAVA_VERSION
-        value: "21"
