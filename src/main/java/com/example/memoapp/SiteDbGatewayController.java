@@ -76,7 +76,14 @@ public class SiteDbGatewayController {
                     }
                     return ps;
                 }, kh);
-                Number k = kh.getKey();
+                // ON DUPLICATE KEY UPDATE では鍵が複数返ることがあるので、先頭の1件だけ使う
+                Number k = null;
+                if (!kh.getKeyList().isEmpty()) {
+                    Object v = kh.getKeyList().get(0).values().stream().findFirst().orElse(null);
+                    if (v instanceof Number num) {
+                        k = num;
+                    }
+                }
                 out.put("rows", List.of());
                 out.put("affected", n);
                 out.put("insertId", k == null ? null : k.longValue());
