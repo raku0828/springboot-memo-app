@@ -69,6 +69,11 @@ public class CodeRunController {
         if (code.length() > MAX_CODE_CHARS) {
             return ResponseEntity.badRequest().body(Map.of("error", "コードが長すぎます（" + MAX_CODE_CHARS + "文字まで）"));
         }
+        // キーボード入力（標準入力）。ページの入力欄の内容を、そのままプログラムへ流す
+        String stdin = body.get("stdin") instanceof String s ? s : "";
+        if (stdin.length() > 4000) {
+            return ResponseEntity.badRequest().body(Map.of("error", "入力が長すぎます（4000文字まで）"));
+        }
         if (!SLOTS.tryAcquire()) {
             return ResponseEntity.status(429).body(Map.of("error", "いま混雑しています。少し待ってから実行してください"));
         }
@@ -80,7 +85,7 @@ public class CodeRunController {
             Files.writeString(src, code, StandardCharsets.UTF_8);
 
             // ---- compile ----
-            ProcResult comp = exec(dir, COMPILE_TIMEOUT_SEC,
+            ProcResult comp = exec(dir, COMPILE_TIMEOUT_SEC, null,
                     javaBin("javac"), "-encoding", "UTF-8", "-d", dir.toString(), src.toString());
             if (comp.timedOut) {
                 return ResponseEntity.ok(result(false, "compile", "コンパイルが" + COMPILE_TIMEOUT_SEC + "秒を超えたので止めました。", null, true));
@@ -91,7 +96,7 @@ public class CodeRunController {
                 return ResponseEntity.ok(result(false, "compile", out, comp.exitCode, false));
             }
             // ---- run ----
-            ProcResult ran = exec(dir, RUN_TIMEOUT_SEC,
+            ProcResult ran = exec(dir, RUN_TIMEOUT_SEC, stdin.getBytes(StandardCharsets.UTF_8),
                     javaBin("java"), "-Xmx128m", "-Dfile.encoding=UTF-8", "-cp", dir.toString(), className);
             if (ran.timedOut) {
                 String out = ran.output.isEmpty() ? "" : ran.output + "\n";
@@ -144,11 +149,14 @@ public class CodeRunController {
 
     // 子プロセスを起動し、出力を読みながらタイムアウトを見張る。
     // 環境変数は空から始めて、必要最小限だけを渡す（秘密情報を渡さない）。
-    private ProcResult exec(Path dir, long timeoutSec, String... cmd) throws IOException, InterruptedException {
+    // stdin が null のときは入力なし（/dev/null）。null でないときは、その内容を標準入力へ流す。
+    private ProcResult exec(Path dir, long timeoutSec, byte[] stdin, String... cmd) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(dir.toFile());
         pb.redirectErrorStream(true);
-        pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        if (stdin == null) {
+            pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        }
         Map<String, String> env = pb.environment();
         String path = env.getOrDefault("PATH", "/usr/local/bin:/usr/bin:/bin");
         String javaHome = env.getOrDefault("JAVA_HOME", "");
@@ -160,6 +168,20 @@ public class CodeRunController {
         env.put("HOME", dir.toString());
         env.put("LANG", "C.UTF-8");
         Process proc = pb.start();
+
+        // 標準入力を流し込む（書き終わったら閉じる＝プログラム側では入力の終わりになる）
+        if (stdin != null) {
+            Thread feeder = new Thread(() -> {
+                try (java.io.OutputStream os = proc.getOutputStream()) {
+                    os.write(stdin);
+                    os.flush();
+                } catch (IOException ignored) {
+                    // プログラムが先に終わった場合などは無視する
+                }
+            });
+            feeder.setDaemon(true);
+            feeder.start();
+        }
 
         StringBuilder buf = new StringBuilder();
         Thread drainer = new Thread(() -> {
